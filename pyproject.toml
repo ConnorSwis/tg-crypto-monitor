@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "tg_crypto_monitor"
+version = "0.1.0"
+description = ""
+authors = ["Connor Swislow <52296992+ConnorSwis@users.noreply.github.com>"]
+readme = "README.md"
+
+[tool.poetry.scripts]
+start = "scripts:start"
+dev = "scripts:dev"
+create_tg_app = "scripts.create_telegram_application:main"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+fastapi = "^0.115.5"
+telethon = "^1.37.0"
+python-dotenv = "^1.0.1"
+uvicorn = "^0.32.0"
+
+
+[tool.poetry.group.dev.dependencies]
+httpx = "^0.27.2"
+bs4 = "^0.0.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

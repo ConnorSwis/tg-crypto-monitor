@@ -1,0 +1,7 @@
+*.json
+__pycache__/
+.env
+.env.docker
+.env.example
+.gitignore
+.README.md
