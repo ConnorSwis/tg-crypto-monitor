@@ -2,10 +2,11 @@ version: '3.8'
 
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: tg_crypto_monitor:latest
+    # build: # Use this block to build the image locally
+    #   context: .
+    #   dockerfile: Dockerfile
+      
+    image: connorswislow/tg-crypto-monitor:latest
     ports:
       - "3000:8000" # Host:Container
     volumes:

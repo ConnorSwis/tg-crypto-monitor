@@ -24,7 +24,6 @@ constants = {
     "TG_PASSWORD": "* The phone number of the Telegram account",
     "MONITORING_IDS": "* The ids of the channels to monitor separated by commas",
     "SESSION_DIRECTORY": "The local directory to store the session file.",
-    "MAX_FEED_SIZE": "The maximum number of messages to store in the database",
     "PORT": "The local port to run the FastAPI app"
 }
 
@@ -51,18 +50,18 @@ TG_PASSWORD = os.getenv("TG_PASSWORD")
 if TG_PASSWORD is None:
     raise ValueError("TG_PASSWORD not found in environment")
 
-_session_directory = os.getenv("SESSION_DIRECTORY")
-if not _session_directory:
-    _session_directory = Path.cwd() / "session"
+SESSION_DIRECTORY = os.getenv("SESSION_DIRECTORY")
+if not SESSION_DIRECTORY:
+    SESSION_DIRECTORY = Path.cwd() / "session"
 else:
-    _session_directory = Path(_session_directory).expanduser().resolve()
-if not _session_directory.exists():
-    _session_directory.mkdir(parents=True, exist_ok=True)
-if not _session_directory.is_dir():
+    SESSION_DIRECTORY = Path(SESSION_DIRECTORY).expanduser().resolve()
+if not SESSION_DIRECTORY.exists():
+    SESSION_DIRECTORY.mkdir(parents=True, exist_ok=True)
+if not SESSION_DIRECTORY.is_dir():
     raise ValueError(
-        f"The path '{_session_directory}' exists but is not a directory."
+        f"The path '{SESSION_DIRECTORY}' exists but is not a directory."
     )
-SESSION_PATH = _session_directory / "telegram_monitoring.session"
+SESSION_PATH = SESSION_DIRECTORY / "telegram_monitoring.session"
 
 
 MONITORING_IDS = os.getenv("MONITORING_IDS")
@@ -76,17 +75,6 @@ else:
         raise ValueError(
             "MONITORING_IDS must be a comma-separated list of integers")
 
-
-MAX_FEED_SIZE = os.getenv("MAX_FEED_SIZE")
-if MAX_FEED_SIZE is None:
-    MAX_FEED_SIZE = 10
-else:
-    try:
-        MAX_FEED_SIZE = int(MAX_FEED_SIZE)
-    except ValueError:
-        raise ValueError("MAX_FEED_SIZE must be an integer")
-
-
 PORT = os.getenv("PORT")
 if not PORT:
     PORT = 8000
@@ -95,3 +83,21 @@ else:
         PORT = int(PORT)
     except ValueError:
         raise ValueError("PORT must be an integer.")
+
+
+class Telegram:
+    app_id = TG_APP_ID
+    app_hash = TG_APP_HASH
+    phone = TG_PHONE
+    password = TG_PASSWORD
+    session_file = SESSION_PATH
+    monitoring_ids = MONITORING_IDS
+
+
+class Config:
+    telegram = Telegram
+    save_dir = SESSION_DIRECTORY
+    port = PORT
+
+
+config = Config

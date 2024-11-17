@@ -1,27 +1,32 @@
-import os
 import json
 import asyncio
+import aiofiles
+from pathlib import Path
+
 
 class PersistentSet:
-    def __init__(self, file_name):
-        self.file_name = file_name
+    def __init__(self, path: Path):
+        self.path = path
         self._set = set()
         self._lock = asyncio.Lock()  # Lock to ensure thread safety
 
-        # Load set from file if it exists
-        if os.path.exists(self.file_name):
-            with open(self.file_name, 'r') as file:
-                try:
-                    data = json.load(file)
-                    self._set = set(data)
-                except json.JSONDecodeError:
-                    self._set = set()
+    async def load(self):
+        """Load the set from the file system."""
+        if not self.path.exists():
+            async with aiofiles.open(self.path, mode='w') as file:
+                await file.write("[]")
+        async with aiofiles.open(self.path, mode='r') as file:
+            data = await file.read()
+            try:
+                self._set = set(json.loads(data))
+            except json.JSONDecodeError:
+                self._set = set()
 
     async def _save_to_file(self):
         """Save the set as a list to the file system."""
-        async with self._lock:  # Ensure file write operations are synchronized
-            with open(self.file_name, 'w') as file:
-                json.dump(list(self._set), file)
+        async with self._lock:
+            async with aiofiles.open(self.path, mode='w') as file:
+                await file.write(json.dumps(list(self._set)))
 
     async def add(self, item):
         """Add an item to the set and save to file."""

@@ -1,43 +1,33 @@
-import asyncio
 import re
+import asyncio
 import logging
-import traceback
-from contextlib import asynccontextmanager
 from typing import List, Optional
+from contextlib import asynccontextmanager
 
+from telethon import TelegramClient, events
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from telethon import TelegramClient
-from telethon import events
 
-from tg_crypto_monitor.config import TG_APP_ID, TG_APP_HASH, TG_PHONE, TG_PASSWORD, MONITORING_IDS, MAX_FEED_SIZE, SESSION_PATH
 from tg_crypto_monitor.datatypes.persistent_set import PersistentSet
-
-
-logger = logging.getLogger()
-latest_mint_addresses = PersistentSet("latest_messages.json")
-seen_mint_addresses = PersistentSet("seen_mint_addresses.json")
-five_digit_code = None
-code_event = asyncio.Event()
-
-client = TelegramClient(SESSION_PATH, TG_APP_ID, TG_APP_HASH)
-app = FastAPI()
-main_app_lifespan = app.router.lifespan_context
+from tg_crypto_monitor.config import config
 
 
 @asynccontextmanager
-async def lifespan_wrapper(app):
-    polling_task = asyncio.create_task(start_telegram_polling())
+async def lifespan_wrapper(app: FastAPI):
     try:
+        asyncio.create_task(client.start(
+            phone=(lambda: config.telegram.phone),
+            password=(lambda: config.telegram.password),
+            code_callback=code_callback
+        ))
+        await seen_mint_addresses.load()
         async with main_app_lifespan(app) as maybe_state:
             yield maybe_state
     except Exception as e:
         logger.error(f"Lifespan Exception: {e}")
         raise
     finally:
-        polling_task.cancel()
-
-
-app.router.lifespan_context = lifespan_wrapper
+        await client.disconnect()
+        logger.info("Telegram client disconnected.")
 
 
 class ConnectionManager:
@@ -48,12 +38,15 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections.append(websocket)
 
+        logger.debug(f"WebSocket connected: {websocket}")
+
     def disconnect(self, websocket: WebSocket):
         self.active_connections.remove(websocket)
 
         logger.debug(f"WebSocket disconnected: {websocket}")
 
     async def broadcast(self, message: str):
+        logger.debug(f"Broadcasting message: {message}")
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
@@ -62,7 +55,21 @@ class ConnectionManager:
                 logger.debug(f"WebSocket disconnected: {connection}")
 
 
+logger = logging.getLogger()
 manager = ConnectionManager()
+seen_mint_addresses = PersistentSet(
+    config.save_dir / "seen_mint_addresses.json"
+)
+five_digit_code = None
+code_event = asyncio.Event()
+client = TelegramClient(
+    config.telegram.session_file,
+    config.telegram.app_id,
+    config.telegram.app_hash
+)
+app = FastAPI()
+main_app_lifespan = app.router.lifespan_context
+app.router.lifespan_context = lifespan_wrapper
 
 
 def mint_address_if_exists(message: Optional[str]) -> Optional[str]:
@@ -86,39 +93,18 @@ async def code_callback():
     return five_digit_code
 
 
-async def start_telegram_polling():
-    """Monitor specified channels, fetching and processing new messages asynchronously."""
-    try:
-        await client.start(
-            phone=(lambda: TG_PHONE),
-            password=(lambda: TG_PASSWORD),
-            code_callback=code_callback
-        )
-    except Exception as e:
-        logger.error(f"Monitoring error: {e}")
-        logger.error(traceback.format_exc())
-    finally:
-        await client.disconnect()
-        logger.info("Telegram client disconnected.")
-
-
-@client.on(events.NewMessage(chats=MONITORING_IDS))
+@client.on(events.NewMessage(chats=config.telegram.monitoring_ids))
 async def new_message_handler(event: events.NewMessage.Event):
     """Event handler for new messages."""
     mint_address = mint_address_if_exists(event.message.message)
     if mint_address:
         if not await seen_mint_addresses.contains(mint_address):
-            await latest_mint_addresses.add(mint_address)
             await seen_mint_addresses.add(mint_address)
-            async with latest_mint_addresses._lock:
-                while len(latest_mint_addresses._set) > MAX_FEED_SIZE:
-                    oldest = list(latest_mint_addresses._set)[0]
-                    await latest_mint_addresses.discard(oldest)
             await manager.broadcast(mint_address)
-            logger.info(f"New mint address: {mint_address}")
+            logger.info(f"Found new mint address: {mint_address}")
 
 
-@app.websocket("/latest/ws")
+@app.websocket("/latest")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint to emit latest messages."""
     await manager.connect(websocket)
@@ -128,12 +114,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-
-
-@app.get("/latest", response_model=List[str])
-async def get_latest_messages():
-    """FastAPI endpoint to get the latest messages."""
-    return await latest_mint_addresses.to_list()
 
 
 @app.post("/set_code")
