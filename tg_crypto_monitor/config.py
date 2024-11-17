@@ -7,6 +7,15 @@ from pathlib import Path
 
 load_dotenv()
 
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+stdout_handler.setFormatter(formatter)
+_logger = logging.getLogger()
+_logger.setLevel(logging.INFO)
+_logger.addHandler(stdout_handler)
+
 constants = {
     # * means required
     "TG_APP_ID": "* The id of the Telegram API",
@@ -15,7 +24,6 @@ constants = {
     "TG_PASSWORD": "* The phone number of the Telegram account",
     "MONITORING_IDS": "* The ids of the channels to monitor separated by commas",
     "SESSION_DIRECTORY": "The local directory to store the session file.",
-    "LIMIT_MSG": "The number of messages to fetch from each channel",
     "MAX_FEED_SIZE": "The maximum number of messages to store in the database",
     "PORT": "The local port to run the FastAPI app"
 }
@@ -69,16 +77,6 @@ else:
             "MONITORING_IDS must be a comma-separated list of integers")
 
 
-LIMIT_MSG = os.getenv("LIMIT_MSG")
-if LIMIT_MSG is None:
-    LIMIT_MSG = 5
-else:
-    try:
-        LIMIT_MSG = int(LIMIT_MSG)
-    except ValueError:
-        raise ValueError("LIMIT_MSG must be an integer")
-
-
 MAX_FEED_SIZE = os.getenv("MAX_FEED_SIZE")
 if MAX_FEED_SIZE is None:
     MAX_FEED_SIZE = 10
@@ -88,6 +86,7 @@ else:
     except ValueError:
         raise ValueError("MAX_FEED_SIZE must be an integer")
 
+
 PORT = os.getenv("PORT")
 if not PORT:
     PORT = 8000
@@ -96,13 +95,3 @@ else:
         PORT = int(PORT)
     except ValueError:
         raise ValueError("PORT must be an integer.")
-
-
-stdout_handler = logging.StreamHandler(sys.stdout)
-stdout_handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-stdout_handler.setFormatter(formatter)
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-logger.addHandler(stdout_handler)

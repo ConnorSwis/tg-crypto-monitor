@@ -1,26 +1,68 @@
 import asyncio
-import random
 import re
 import logging
 import traceback
 from contextlib import asynccontextmanager
-from typing import List, Callable, Coroutine, Optional
+from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from telethon import TelegramClient
-from telethon.errors import RPCError
-from telethon.tl.functions.messages import GetDialogsRequest, GetHistoryRequest
-from telethon.tl.types import Channel, InputPeerEmpty
+from telethon import events
 
-from tg_crypto_monitor.config import TG_APP_ID, TG_APP_HASH, TG_PHONE, TG_PASSWORD, MONITORING_IDS, LIMIT_MSG, MAX_FEED_SIZE, SESSION_PATH
+from tg_crypto_monitor.config import TG_APP_ID, TG_APP_HASH, TG_PHONE, TG_PASSWORD, MONITORING_IDS, MAX_FEED_SIZE, SESSION_PATH
 from tg_crypto_monitor.datatypes.persistent_set import PersistentSet
 
-logger = logging.getLogger()
 
+logger = logging.getLogger()
 latest_mint_addresses = PersistentSet("latest_messages.json")
 seen_mint_addresses = PersistentSet("seen_mint_addresses.json")
 five_digit_code = None
 code_event = asyncio.Event()
+
+client = TelegramClient(SESSION_PATH, TG_APP_ID, TG_APP_HASH)
+app = FastAPI()
+main_app_lifespan = app.router.lifespan_context
+
+
+@asynccontextmanager
+async def lifespan_wrapper(app):
+    polling_task = asyncio.create_task(start_telegram_polling())
+    try:
+        async with main_app_lifespan(app) as maybe_state:
+            yield maybe_state
+    except Exception as e:
+        logger.error(f"Lifespan Exception: {e}")
+        raise
+    finally:
+        polling_task.cancel()
+
+
+app.router.lifespan_context = lifespan_wrapper
+
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+        logger.debug(f"WebSocket disconnected: {websocket}")
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except WebSocketDisconnect:
+                self.disconnect(connection)
+                logger.debug(f"WebSocket disconnected: {connection}")
+
+
+manager = ConnectionManager()
 
 
 def mint_address_if_exists(message: Optional[str]) -> Optional[str]:
@@ -36,64 +78,6 @@ def mint_address_if_exists(message: Optional[str]) -> Optional[str]:
         return match.group(0) if match else None
 
 
-async def fetch_target_groups(*, client: TelegramClient, semaphore: asyncio.Semaphore
-                              ) -> List[Channel]:
-    """Fetch group chats from the client and filter to include only target channels."""
-    try:
-        async with semaphore:
-            result = await client(GetDialogsRequest(
-                offset_date=None,
-                offset_id=0,
-                offset_peer=InputPeerEmpty(),
-                limit=100000,
-                hash=0
-            ))
-        return [chat for chat in result.chats if chat.id in MONITORING_IDS]
-    except RPCError as e:
-        logger.error(f"Error fetching target groups: {e}")
-        return []
-
-
-async def fetch_messages(channel_entity, *, client: TelegramClient, semaphore: asyncio.Semaphore):
-    """Fetch recent messages from a given channel entity."""
-    try:
-        async with semaphore:
-            posts = await client(GetHistoryRequest(
-                peer=channel_entity,
-                limit=LIMIT_MSG,
-                offset_date=None,
-                offset_id=0,
-                max_id=0,
-                min_id=0,
-                add_offset=0,
-                hash=0
-            ))
-        return posts.messages
-    except RPCError as e:
-        logger.error(f"Error fetching messages for {channel_entity.id}: {e}")
-        return []
-
-
-async def process_messages(messages, on_change: Optional[Callable | Coroutine] = None):
-    """Process each new message and update the PersistentSet."""
-    for message in messages:
-        mint_address = mint_address_if_exists(message.message)
-        if mint_address:
-            if not await seen_mint_addresses.contains(mint_address):
-                await latest_mint_addresses.add(mint_address)
-                await seen_mint_addresses.add(mint_address)
-                async with latest_mint_addresses._lock:
-                    while len(latest_mint_addresses._set) > MAX_FEED_SIZE:
-                        oldest = list(latest_mint_addresses._set)[0]
-                        await latest_mint_addresses.discard(oldest)
-
-                if on_change is not None:
-                    if asyncio.iscoroutinefunction(on_change):
-                        await on_change(mint_address)
-                    else:
-                        on_change(mint_address)
-
-
 async def code_callback():
     """Asynchronous callback to wait for the code to be set."""
     global five_digit_code
@@ -102,49 +86,48 @@ async def code_callback():
     return five_digit_code
 
 
-async def monitor_channels(on_change: Optional[Callable | Coroutine] = None):
+async def start_telegram_polling():
     """Monitor specified channels, fetching and processing new messages asynchronously."""
-    client = TelegramClient(SESSION_PATH, TG_APP_ID, TG_APP_HASH)
-    api_semaphore = asyncio.Semaphore(5)
     try:
-        await client.start(phone=(lambda: TG_PHONE), password=(lambda: TG_PASSWORD), code_callback=code_callback)
-        target_groups = await fetch_target_groups(client=client, semaphore=api_semaphore)
-        channel_entities = [await client.get_entity(group.id) for group in target_groups]
-        while True:
-            for channel_entity in channel_entities:
-                messages = await fetch_messages(channel_entity, client=client, semaphore=api_semaphore)
-                await process_messages(messages, on_change=on_change)
-            await asyncio.sleep(1 + random.random() * 5)
+        await client.start(
+            phone=(lambda: TG_PHONE),
+            password=(lambda: TG_PASSWORD),
+            code_callback=code_callback
+        )
     except Exception as e:
         logger.error(f"Monitoring error: {e}")
         logger.error(traceback.format_exc())
-
     finally:
         await client.disconnect()
+        logger.info("Telegram client disconnected.")
 
 
-app = FastAPI()
-main_app_lifespan = app.router.lifespan_context
+@client.on(events.NewMessage(chats=MONITORING_IDS))
+async def new_message_handler(event: events.NewMessage.Event):
+    """Event handler for new messages."""
+    mint_address = mint_address_if_exists(event.message.message)
+    if mint_address:
+        if not await seen_mint_addresses.contains(mint_address):
+            await latest_mint_addresses.add(mint_address)
+            await seen_mint_addresses.add(mint_address)
+            async with latest_mint_addresses._lock:
+                while len(latest_mint_addresses._set) > MAX_FEED_SIZE:
+                    oldest = list(latest_mint_addresses._set)[0]
+                    await latest_mint_addresses.discard(oldest)
+            await manager.broadcast(mint_address)
+            logger.info(f"New mint address: {mint_address}")
 
 
-@asynccontextmanager
-async def lifespan_wrapper(app):
-    monitor_task = asyncio.create_task(monitor_channels())
+@app.websocket("/latest/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint to emit latest messages."""
+    await manager.connect(websocket)
+    logger.info("WebSocket connected.")
     try:
-        async with main_app_lifespan(app) as maybe_state:
-            yield maybe_state
-    except Exception as e:
-        logger.error(f"Lifespan Exception: {e}")
-        raise
-    finally:
-        monitor_task.cancel()
-        try:
-            await monitor_task
-        except asyncio.CancelledError:
-            pass
-
-
-app.router.lifespan_context = lifespan_wrapper
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
 
 @app.get("/latest", response_model=List[str])
